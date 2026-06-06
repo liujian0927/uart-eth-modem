@@ -1589,7 +1589,7 @@ esp_err_t UartEthModem::RunFlightModeInitSequence() {
     ret = AtDetect();
     if (ret != ESP_OK) {
         ESP_LOGE(kTag, "Modem not detected");
-        SetNetworkEvent(UartEthModemEvent::ErrorInitFailed);
+        SetNetworkEvent(UartEthModemEvent::ErrorInitFailed, "Modem not detected (AT no response)");
         return ret;
     }
 
@@ -1597,7 +1597,7 @@ esp_err_t UartEthModem::RunFlightModeInitSequence() {
     ret = SendAt("AT+CFUN=4", resp, 3000);
     if (ret != ESP_OK) {
         ESP_LOGE(kTag, "Failed to enter flight mode");
-        SetNetworkEvent(UartEthModemEvent::ErrorInitFailed);
+        SetNetworkEvent(UartEthModemEvent::ErrorInitFailed, "Failed to enter flight mode (CFUN=4)");
         return ret;
     }
 
@@ -1627,7 +1627,7 @@ esp_err_t UartEthModem::RunNormalModeInitSequence() {
     ret = AtDetect();
     if (ret != ESP_OK) {
         ESP_LOGE(kTag, "Modem not detected");
-        SetNetworkEvent(UartEthModemEvent::ErrorInitFailed);
+        SetNetworkEvent(UartEthModemEvent::ErrorInitFailed, "Modem not detected (AT no response)");
         return ret;
     }
 
@@ -1664,7 +1664,7 @@ esp_err_t UartEthModem::RunNormalModeInitSequence() {
         ret = SendAtWithRetry("AT", resp, 500, 20);
         if (ret != ESP_OK) {
             ESP_LOGE(kTag, "Modem not responding after reset");
-            SetNetworkEvent(UartEthModemEvent::ErrorInitFailed);
+            SetNetworkEvent(UartEthModemEvent::ErrorInitFailed, "Modem not responding after reset");
             return ret;
         }
     }
@@ -1673,7 +1673,7 @@ esp_err_t UartEthModem::RunNormalModeInitSequence() {
     ret = SendAt("AT+CFUN=1", resp, 3000);
     if (ret != ESP_OK) {
         ESP_LOGE(kTag, "Failed to enter full functionality mode");
-        SetNetworkEvent(UartEthModemEvent::ErrorInitFailed);
+        SetNetworkEvent(UartEthModemEvent::ErrorInitFailed, "Failed to enter full functionality mode (CFUN=1)");
         return ret;
     }
 
@@ -1700,7 +1700,7 @@ esp_err_t UartEthModem::RunNormalModeInitSequence() {
             SetNetworkEvent(UartEthModemEvent::ErrorRegistrationDenied);
         } else {
             ESP_LOGE(kTag, "Registration timeout");
-            SetNetworkEvent(UartEthModemEvent::ErrorInitFailed);
+            SetNetworkEvent(UartEthModemEvent::ErrorInitFailed, "Network registration timeout");
         }
         return ESP_ERR_TIMEOUT;
     }
@@ -1720,7 +1720,7 @@ esp_err_t UartEthModem::RunNormalModeInitSequence() {
         ret = SendAt("AT+ECNETDEVCTL=2,1,1", resp, 5000);
         if (ret != ESP_OK) {
             ESP_LOGE(kTag, "Failed to start network device");
-            SetNetworkEvent(UartEthModemEvent::ErrorInitFailed);
+            SetNetworkEvent(UartEthModemEvent::ErrorInitFailed, "Failed to start network device (ECNETDEVCTL)");
             return ret;
         }
         // Send handshake request
@@ -1728,7 +1728,7 @@ esp_err_t UartEthModem::RunNormalModeInitSequence() {
         ret = SendFrame(kHandshakeRequest, sizeof(kHandshakeRequest), FrameType::kEthernet);
         if (ret != ESP_OK) {
             ESP_LOGE(kTag, "Handshake failed");
-            SetNetworkEvent(UartEthModemEvent::ErrorInitFailed);
+            SetNetworkEvent(UartEthModemEvent::ErrorInitFailed, "Handshake request send failed");
             return ret;
         }
     }
@@ -1742,7 +1742,7 @@ esp_err_t UartEthModem::RunNormalModeInitSequence() {
         ESP_LOGI(kTag, "Handshake successful");
     } else {
         ESP_LOGE(kTag, "Handshake timeout");
-        SetNetworkEvent(UartEthModemEvent::ErrorInitFailed);
+        SetNetworkEvent(UartEthModemEvent::ErrorInitFailed, "Handshake timeout");
         return ESP_ERR_TIMEOUT;
     }
 
@@ -1750,7 +1750,7 @@ esp_err_t UartEthModem::RunNormalModeInitSequence() {
     ret = SendAt("AT+ECSCLKEX=1," + std::to_string(kModemSleepTimeoutS) + ",30", resp, 1000);
     if (ret != ESP_OK) {
         ESP_LOGE(kTag, "Failed to set modem sleep parameters");
-        SetNetworkEvent(UartEthModemEvent::ErrorInitFailed);
+        SetNetworkEvent(UartEthModemEvent::ErrorInitFailed, "Failed to set modem sleep parameters (ECSCLKEX)");
         return ret;
     }
 
@@ -1880,7 +1880,7 @@ void IRAM_ATTR UartEthModem::SrdyIsrHandler(void* arg) {
     }
 }
 
-void UartEthModem::SetNetworkEvent(UartEthModemEvent event) {
+void UartEthModem::SetNetworkEvent(UartEthModemEvent event, const std::string& detail) {
     // Always update the event value
     UartEthModemEvent old_event = network_event_.exchange(event);
     // Set event bit to notify waiting tasks
@@ -1889,9 +1889,14 @@ void UartEthModem::SetNetworkEvent(UartEthModemEvent event) {
     }
     
     if (old_event != event) {
-        ESP_LOGI(kTag, "Network event: %s -> %s", GetNetworkEventName(old_event), GetNetworkEventName(event));
+        if (detail.empty()) {
+            ESP_LOGI(kTag, "Network event: %s -> %s", GetNetworkEventName(old_event), GetNetworkEventName(event));
+        } else {
+            ESP_LOGI(kTag, "Network event: %s -> %s (%s)", GetNetworkEventName(old_event),
+                     GetNetworkEventName(event), detail.c_str());
+        }
         if (network_event_callback_) {
-            network_event_callback_(event);
+            network_event_callback_(event, detail);
         }
     }
 }

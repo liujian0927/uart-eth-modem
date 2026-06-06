@@ -106,7 +106,11 @@ public:
     };
 
     // Callback types
-    using UartEthModemEventCallback = std::function<void(UartEthModemEvent event)>;
+    // detail carries a human-readable reason for the event (mainly for error
+    // events like ErrorInitFailed), so the upper layer can surface the concrete
+    // failure cause instead of only a generic message. May be empty.
+    using UartEthModemEventCallback =
+            std::function<void(UartEthModemEvent event, const std::string& detail)>;
 
     explicit UartEthModem(const Config& config);
     ~UartEthModem();
@@ -346,7 +350,9 @@ private:
     static void IRAM_ATTR SrdyIsrHandler(void* arg);
 
     // State management
-    void SetNetworkEvent(UartEthModemEvent event);
+    // detail is an optional human-readable reason forwarded to the event
+    // callback (mainly for error events). Empty for normal state changes.
+    void SetNetworkEvent(UartEthModemEvent event, const std::string& detail = "");
 
     // Resource cleanup
     void CleanupResources(bool cleanup_iot_eth = true);

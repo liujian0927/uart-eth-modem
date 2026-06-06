@@ -39,14 +39,22 @@ auto modem = std::make_unique<UartEthModem>(cfg);
 // response to the RequestingPdpContext event below.
 modem->SetPdpContext("internet", "IP");
 
-modem->SetNetworkEventCallback([](UartEthModem::UartEthModemEvent ev) {
-    ESP_LOGI("app", "modem event: %s", UartEthModem::GetNetworkEventName(ev));
+// detail 携带事件的可读原因，错误事件（如 ErrorInitFailed）会给出具体失败
+// 步骤，便于上层直接展示原因；正常状态变更时 detail 为空。
+modem->SetNetworkEventCallback([](UartEthModem::UartEthModemEvent ev,
+                                   const std::string& detail) {
+    ESP_LOGI("app", "modem event: %s %s",
+             UartEthModem::GetNetworkEventName(ev), detail.c_str());
 });
 
 modem->Start();
 ```
 
 ## 变更日志 (Changelog)
+
+### [0.5.0] - 2026-06-07
+- **接口变更**: `SetNetworkEventCallback` 的回调签名由 `void(UartEthModemEvent)` 调整为 `void(UartEthModemEvent, const std::string& detail)`。
+- `ErrorInitFailed` 等错误事件现在携带具体失败原因（如 `Modem not detected`、`Network registration timeout`、`Handshake timeout` 等），上层无需查看串口日志即可定位失败步骤。
 
 ### [0.4.0] - 2026-04-28
 - 新增 `SetPdpContext(apn, pdp_type)` API，允许上层注入 APN 和 PDP 类型；为空时沿用模组默认配置。
