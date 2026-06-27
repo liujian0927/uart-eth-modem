@@ -491,7 +491,7 @@ sequenceDiagram
 
 ```mermaid
 graph TB
-    START[Start(flight_mode)] --> CREATEQ[创建 event_queue_]
+    START[Start(mode)] --> CREATEQ[创建 event_queue_]
     CREATEQ --> CREATETXQ[创建 tx_queue_<br/>(深度 kTxQueueDepth)]
     CREATETXQ --> INITUART[InitUart<br/>配置 UART 参数 + 引脚]
     INITUART --> INITGPIO[InitGpio<br/>MRDY 输出 / SRDY 输入 + ISR + 唤醒]
@@ -559,7 +559,15 @@ sequenceDiagram
     INIT->>INIT: kEventInitDone
 ```
 
-**飞行模式 (`flight_mode=true`)** 流程：`AtDetect → AT+CFUN=4 → CheckSimCard → QueryModemInfo`，跳过网络注册和 `iot_eth` 安装，最后发出 `InFlightMode` 事件。
+### 6.3 其他启动模式
+
+`Start()` 支持三种启动模式：
+
+- **普通模式 (`StartMode::kNormal`)**：执行完整联网初始化序列，注册网络、启动串口网卡握手并安装 `iot_eth`。
+- **飞行模式 (`StartMode::kFlight`)**：`AtDetect → AT+CFUN=4 → CheckSimCard → QueryModemInfo`，跳过网络注册和 `iot_eth` 安装，最后发出 `InFlightMode` 事件。
+- **RF 测试模式 (`StartMode::kRfTest`)**：`AtDetect → AT+ECSIMCFG="SimSimulator",1 → AT+ECRST → 等待 AT 恢复 → AT+CFUN=1`，最后发出 `RfTestReady` 事件。该模式不安装 `iot_eth`，不执行 SIM/IMEI/注册查询，也不启动普通蜂窝网络。
+
+退出 RF 测试模式由 `ExitRfTestMode()` 执行：`AT+ECSIMCFG="SimSimulator",0 → AT+ECRST → 等待 AT 恢复 → AT+CFUN=0`，用于恢复正常 SIM 卡模式、重启模组使配置生效，并避免 RF 测试结束后继续保持全功能态。
 
 ---
 
@@ -929,5 +937,5 @@ modem.SetDebug(true);
 ---
 
 **文档版本**：2.0
-**最后更新**：2026-05-07
+**最后更新**：2026-06-28
 **适用模块**：EC801E / NT26K 等支持 UART NAT 模式的 4G 模块

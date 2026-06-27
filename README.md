@@ -15,6 +15,7 @@ ESP32 上的 UART Ethernet Modem 驱动组件。通过 UHCI + GDMA 实现高效�
 - **状态管理**: 完整的低功耗状态机（`Idle` / `PendingActive` / `Active` / `PendingIdle`），支持 MRDY/SRDY 唤醒机制与按需 PM 锁。
 - **协议支持**: 自动处理帧头部、校验以及 AT 命令；AT/Ethernet/握手帧统一走 4 字节自定义帧头。
 - **事件驱动**: ISR、`TxTask`、应用层均通过 `event_queue_` 与 `event_group_` 与主任务异步通信。
+- **启动模式**: 支持普通联网模式、飞行模式和 RF 实验室测试模式；RF 测试模式只执行指定 AT 序列并保持 AT 传输层，不安装 `iot_eth` 网络接口。
 - **APN / PDP 配置**: 支持上层注入 APN 和 PDP 类型，启动时自动写入模组并按需重启；并对外发出 `RequestingPdpContext` 事件，供同步回调场景下回填配置。
 - **波特率自适应**: 启动阶段自动探测模组当前波特率（115200 / 2M / 3M），与目标值不一致时仅复位一次完成切换。
 
@@ -50,7 +51,45 @@ modem->SetNetworkEventCallback([](UartEthModem::UartEthModemEvent ev,
 modem->Start();
 ```
 
+不传参数时，`Start()` 默认使用普通联网模式。需要飞行模式或 RF 测试模式时，通过 `StartMode` 显式选择启动序列：
+
+```cpp
+modem->Start(UartEthModem::StartMode::kNormal);  // 普通联网模式，默认值
+modem->Start(UartEthModem::StartMode::kFlight);  // 飞行模式，查询模组/SIM信息
+modem->Start(UartEthModem::StartMode::kRfTest);  // RF实验室测试模式
+```
+
+RF 测试模式的初始化序列为：
+
+```text
+AtDetect
+AT+ECSIMCFG="SimSimulator",1
+AT+ECRST
+等待 AT 恢复
+AT+CFUN=1
+RfTestReady
+```
+
+该模式不会执行 SIM/IMEI/注册状态查询，不会启动网卡握手，也不会安装 `iot_eth`。进入 `RfTestReady` 后，除非上层主动调用 `SendAt()`，组件不会继续发送普通应用 AT 指令。
+
+退出 RF 测试模式时调用 `ExitRfTestMode()`：
+
+```text
+AT+ECSIMCFG="SimSimulator",0
+AT+ECRST
+等待 AT 恢复
+AT+CFUN=0
+```
+
+该退出流程用于恢复正常 SIM 卡模式、重启模组使配置生效，并将模组切回 `AT+CFUN=0`，避免 RF 测试结束后继续保持全功能态。
+
 ## 变更日志 (Changelog)
+
+### [0.6.0] - 2026-06-28
+- **接口变更**: `Start(bool flight_mode)` 替换为 `Start(StartMode mode = StartMode::kNormal)`，非默认模式需显式选择启动模式。
+- 新增 `StartMode::kRfTest` 和 `RfTestReady` 事件，用于 RF 实验室测试模式。
+- RF 测试模式执行 `AT+ECSIMCFG="SimSimulator",1`、`AT+ECRST`、`AT+CFUN=1` 后保持 AT 传输层，不安装 `iot_eth`，也不发送普通联网初始化指令。
+- 新增 `ExitRfTestMode()`，退出 RF 测试模式时恢复正常 SIM 卡模式、重启模组并发送 `AT+CFUN=0`。
 
 ### [0.5.0] - 2026-06-07
 - **接口变更**: `SetNetworkEventCallback` 的回调签名由 `void(UartEthModemEvent)` 调整为 `void(UartEthModemEvent, const std::string& detail)`。

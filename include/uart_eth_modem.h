@@ -77,6 +77,7 @@ public:
         Connected,               // Network connected successfully (Ready, got IP address)
         Disconnected,            // Network disconnected (LinkDown)
         InFlightMode,            // Flight mode initialized (modem/SIM info available, no network)
+        RfTestReady,             // RF lab test mode initialized
         ErrorNoSim,              // No SIM card detected
         ErrorRegistrationDenied, // Network registration denied (CEREG=3)
         ErrorInitFailed,         // Modem initialization failed (general error)
@@ -91,6 +92,12 @@ public:
         std::string tac;
         std::string ci;
         int act = 0;
+    };
+
+    enum class StartMode {
+        kNormal,
+        kFlight,
+        kRfTest,
     };
 
     // Configuration
@@ -129,11 +136,10 @@ public:
     * 4. Establish handshake with modem
     * 5. Install iot_eth driver and create netif
     *
-    * @param flight_mode If true, enter flight mode (AT+CFUN=4) instead of full mode,
-    *                    only query modem/SIM info without network registration
+    * @param mode Start mode for the initialization sequence. Defaults to normal mode.
     * @return ESP_OK on success
     */
-    esp_err_t Start(bool flight_mode = false);
+    esp_err_t Start(StartMode mode = StartMode::kNormal);
 
     /**
     * @brief Stop the modem
@@ -143,6 +149,16 @@ public:
     * @return ESP_OK on success
     */
     esp_err_t Stop();
+
+    /**
+    * @brief Exit RF lab test mode
+    *
+    * This restores normal SIM-card mode, reboots the module so the setting
+    * takes effect, then returns the module to CFUN=0.
+    *
+    * @return ESP_OK on success
+    */
+    esp_err_t ExitRfTestMode();
 
     /**
     * @brief Send AT command synchronously (thread-safe)
@@ -336,6 +352,7 @@ private:
     // Initialization sequence
     esp_err_t RunFlightModeInitSequence();
     esp_err_t RunNormalModeInitSequence();
+    esp_err_t RunRfTestModeInitSequence();
     bool CheckSimCard();
     bool WaitForRegistration(uint32_t timeout_ms);
     void QueryModemInfo();
@@ -401,7 +418,7 @@ private:
     std::atomic<bool> initializing_{false};
     std::atomic<uint8_t> seq_no_{0};
     std::atomic<bool> debug_enabled_{false};
-    bool flight_mode_{false};  // Flight mode: only query modem info, no network registration
+    StartMode start_mode_{StartMode::kNormal};
 
     // Working state machine
     std::atomic<WorkingState> working_state_{WorkingState::Idle};
@@ -472,4 +489,3 @@ private:
 
     static constexpr const char* kTag = "UartEthModem";
 };
-

@@ -88,15 +88,21 @@ UartEthModem::~UartEthModem() {
     }
 }
 
-esp_err_t UartEthModem::Start(bool flight_mode) {
-    ESP_LOGI(kTag, "Starting UartEthModem%s...", flight_mode ? " (flight mode)" : "");
+esp_err_t UartEthModem::Start(StartMode mode) {
+    const char* mode_name = "normal";
+    if (mode == StartMode::kFlight) {
+        mode_name = "flight";
+    } else if (mode == StartMode::kRfTest) {
+        mode_name = "RF test";
+    }
+    ESP_LOGI(kTag, "Starting UartEthModem (%s mode)...", mode_name);
 
     if (initialized_.load()) {
         ESP_LOGW(kTag, "Already started");
         return ESP_ERR_INVALID_STATE;
     }
 
-    flight_mode_ = flight_mode;
+    start_mode_ = mode;
     stop_flag_ = false;
     handshake_done_ = false;
     initializing_ = true;
@@ -266,6 +272,34 @@ esp_err_t UartEthModem::Stop() {
 
     ESP_LOGI(kTag, "UartEthModem stopped");
     return ESP_OK;
+}
+
+esp_err_t UartEthModem::ExitRfTestMode() {
+    std::string resp;
+
+    ESP_LOGI(kTag, "Exiting RF test mode, restoring normal SIM mode...");
+    esp_err_t ret = SendAtWithRetry("AT+ECSIMCFG=\"SimSimulator\",0", resp, 3000, 3);
+    if (ret != ESP_OK) {
+        ESP_LOGE(kTag, "Failed to restore normal SIM mode: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ESP_LOGI(kTag, "Rebooting modem after restoring normal SIM mode...");
+    SendAt("AT+ECRST", resp, 500);
+    vTaskDelay(pdMS_TO_TICKS(1500));
+
+    ret = SendAtWithRetry("AT", resp, 500, 20);
+    if (ret != ESP_OK) {
+        ESP_LOGE(kTag, "Modem not responding after RF test exit reset");
+        return ret;
+    }
+
+    ESP_LOGI(kTag, "Returning modem to CFUN=0 after RF test exit...");
+    ret = SendAt("AT+CFUN=0", resp, 5000);
+    if (ret != ESP_OK) {
+        ESP_LOGE(kTag, "Failed to enter CFUN=0 after RF test exit: %s", esp_err_to_name(ret));
+    }
+    return ret;
 }
 
 esp_err_t UartEthModem::SendAt(const std::string& cmd, std::string& response, uint32_t timeout_ms) {
@@ -455,6 +489,7 @@ const char* UartEthModem::GetNetworkEventName(UartEthModemEvent event) {
         case UartEthModemEvent::Connected: return "Connected";
         case UartEthModemEvent::Disconnected: return "Disconnected";
         case UartEthModemEvent::InFlightMode: return "InFlightMode";
+        case UartEthModemEvent::RfTestReady: return "RfTestReady";
         case UartEthModemEvent::ErrorNoSim: return "ErrorNoSim";
         case UartEthModemEvent::ErrorRegistrationDenied: return "ErrorRegistrationDenied";
         case UartEthModemEvent::ErrorInitFailed: return "ErrorInitFailed";
@@ -468,16 +503,17 @@ const char* UartEthModem::GetNetworkEventName(UartEthModemEvent event) {
 
 esp_err_t UartEthModem::InitUart() {
     // UHCI DMA mode: only configure UART params, don't install driver (UHCI takes over)
-    uart_config_t uart_config = {
-        .baud_rate = config_.baud_rate,
-        .data_bits = UART_DATA_8_BITS,
-        .parity = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .rx_flow_ctrl_thresh = 0,
-        .source_clk = UART_SCLK_DEFAULT,
-        .flags = {.allow_pd = 0, .backup_before_sleep = 0},
-    };
+    // Zero-initialize and assign per-field so newly added uart_config_t members
+    // across ESP-IDF versions (e.g. rx_glitch_filt_thresh in 6.2) stay defaulted
+    // without tripping -Werror=missing-field-initializers.
+    uart_config_t uart_config = {};
+    uart_config.baud_rate = config_.baud_rate;
+    uart_config.data_bits = UART_DATA_8_BITS;
+    uart_config.parity = UART_PARITY_DISABLE;
+    uart_config.stop_bits = UART_STOP_BITS_1;
+    uart_config.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
+    uart_config.rx_flow_ctrl_thresh = 0;
+    uart_config.source_clk = UART_SCLK_DEFAULT;
     esp_err_t ret = uart_param_config(config_.uart_num, &uart_config);
     ESP_RETURN_ON_ERROR(ret, kTag, "Failed to configure UART");
 
@@ -1222,7 +1258,18 @@ void UartEthModem::InitTaskRun() {
 
     // Run initialization sequence based on mode
     {
-        esp_err_t init_ret = flight_mode_ ? RunFlightModeInitSequence() : RunNormalModeInitSequence();
+        esp_err_t init_ret = ESP_FAIL;
+        switch (start_mode_) {
+            case StartMode::kNormal:
+                init_ret = RunNormalModeInitSequence();
+                break;
+            case StartMode::kFlight:
+                init_ret = RunFlightModeInitSequence();
+                break;
+            case StartMode::kRfTest:
+                init_ret = RunRfTestModeInitSequence();
+                break;
+        }
         if (init_ret != ESP_OK) {
             ESP_LOGE(kTag, "Initialization sequence failed");
             stop_flag_ = true;
@@ -1231,8 +1278,9 @@ void UartEthModem::InitTaskRun() {
             goto exit;
         }
 
-        // Initialize iot_eth (skip in flight mode - no network needed)
-        if (!flight_mode_) {
+        // Initialize iot_eth only in normal mode. Flight and RF test modes
+        // keep the AT transport alive but never expose an Ethernet netif.
+        if (start_mode_ == StartMode::kNormal) {
             if (InitIotEth() != ESP_OK) {
                 ESP_LOGE(kTag, "Failed to initialize iot_eth");
                 stop_flag_ = true;
@@ -1614,6 +1662,54 @@ esp_err_t UartEthModem::RunFlightModeInitSequence() {
     ESP_LOGI(kTag, "Flight mode initialization complete");
     initialized_ = true;
     SetNetworkEvent(UartEthModemEvent::InFlightMode);
+    return ESP_OK;
+}
+
+esp_err_t UartEthModem::RunRfTestModeInitSequence() {
+    std::string resp;
+    esp_err_t ret;
+
+    ESP_LOGI(kTag, "Detecting modem for RF test mode...");
+    ret = AtDetect();
+    if (ret != ESP_OK) {
+        ESP_LOGE(kTag, "Modem not detected");
+        SetNetworkEvent(UartEthModemEvent::ErrorInitFailed, "Modem not detected (AT no response)");
+        return ret;
+    }
+
+    ESP_LOGI(kTag, "Enabling SIM simulator for RF test mode...");
+    ret = SendAtWithRetry("AT+ECSIMCFG=\"SimSimulator\",1", resp, 3000, 3);
+    if (ret != ESP_OK) {
+        ESP_LOGE(kTag, "Failed to enable SIM simulator");
+        SetNetworkEvent(UartEthModemEvent::ErrorInitFailed,
+                        "Failed to enable SIM simulator (ECSIMCFG)");
+        return ret;
+    }
+
+    ESP_LOGI(kTag, "Rebooting modem after SIM simulator configuration...");
+    SendAt("AT+ECRST", resp, 500);
+    vTaskDelay(pdMS_TO_TICKS(1500));
+
+    ret = SendAtWithRetry("AT", resp, 500, 20);
+    if (ret != ESP_OK) {
+        ESP_LOGE(kTag, "Modem not responding after RF test reset");
+        SetNetworkEvent(UartEthModemEvent::ErrorInitFailed,
+                        "Modem not responding after RF test reset");
+        return ret;
+    }
+
+    ESP_LOGI(kTag, "Entering full functionality mode for RF test...");
+    ret = SendAt("AT+CFUN=1", resp, 5000);
+    if (ret != ESP_OK) {
+        ESP_LOGE(kTag, "Failed to enter full functionality mode for RF test");
+        SetNetworkEvent(UartEthModemEvent::ErrorInitFailed,
+                        "Failed to enter full functionality mode (CFUN=1)");
+        return ret;
+    }
+
+    ESP_LOGI(kTag, "RF test mode initialization complete");
+    initialized_ = true;
+    SetNetworkEvent(UartEthModemEvent::RfTestReady);
     return ESP_OK;
 }
 
